@@ -1,0 +1,20 @@
+cat > .gitignore << 'EOF'
+# --- Lemmings editor temp / snapshot dosyaları ---
+bundle-all-lisp-*.txt
+changed-files-*.txt
+
+# --- Common Lisp derleme çıktılarını alma ---
+*.fasl
+*.fas
+*.x86f
+*.lib
+*.dll
+*.so
+*.dylib
+
+# Yedek / editor geçici dosyaları
+*~
+.#*
+*.swp
+*.swo
+EOF
