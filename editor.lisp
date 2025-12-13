@@ -26,6 +26,8 @@
 (defparameter *grid*  nil)  ;; 2D array: [y, x]
 (defparameter *rects* nil)  ;; canvas rectangle id’leri
 
+(defparameter *canvas* nil) ;; aktif canvas objesi (load için kullanacağız)
+
 ;; Aktif araç (palette’den seçilecek)
 (defparameter *current-tool* :ground)
 
@@ -87,12 +89,72 @@ Format: (:width W :height H :tiles ((row0) (row1) ...))"
 
 (defun save-level-dialog ()
   "Kullanıcıdan dosya ismi iste ve oraya kaydet."
-  (let* ((path (get-save-file :defaultextension ".lisp"
-                              :filetypes '(("Lisp files" "*.lisp")
-                                           ("All files" "*.*")))))
+  (let* ((path (get-save-file
+                :filetypes '(("Lisp files" "*.lisp")
+                             ("All files" "*.*")))))
     (when path
       (save-level-to-file path)
       (format t "Level kaydedildi: ~A~%" path))))
+
+;;;------------------------------------------------------------
+;;; Level yükleme (dosyadan okuma)
+;;;------------------------------------------------------------
+
+(defun apply-level-to-current-grid (level &optional canvas)
+  "LEVEL s-exp’ini mevcut *grid* (+ opsiyonel CANVAS) üzerine uygular.
+
+LEVEL formatı:
+  (:width W :height H :tiles ((row0) (row1) ...))"
+  (let* ((w (getf level :width))
+         (h (getf level :height))
+         (tiles (getf level :tiles)))
+    ;; Basit format kontrolleri
+    (unless (and (integerp w) (integerp h)
+                 (> w 0) (> h 0)
+                 (listp tiles))
+      (error "Geçersiz level formatı: ~S" level))
+
+    ;; Şimdilik: dosyadaki boyutlar mevcut grid ile aynı olmalı
+    (when (or (/= w *grid-width*)
+              (/= h *grid-height*))
+      (error "Level boyutu uymuyor. Dosya: (~D x ~D), Editor: (~D x ~D)"
+             w h *grid-width* *grid-height*))
+
+    ;; Grid’i doldur
+    (dotimes (y *grid-height*)
+      (let ((row (nth y tiles)))
+        (dotimes (x *grid-width*)
+          (let* ((tile (and row (nth x row)))
+                 ;; Bilinmeyen tile tiplerini :empty’ye düşürelim
+                 (safe-tile (if (member tile
+                                        '(:empty :ground :steel :spawn :exit
+                                          :can-be-excavated :contacts
+                                          :decorations-and-background-anims))
+                                tile
+                                :empty)))
+            (setf (aref *grid* y x) safe-tile)
+            (when canvas
+              (update-tile-on-canvas canvas x y))))))))
+
+(defun load-level-from-file (pathname &optional canvas)
+  "PATHNAME’den level s-exp’ini oku ve mevcut grid’e uygula."
+  (handler-case
+      (with-open-file (in pathname :direction :input)
+        (let ((form (read in nil nil)))
+          (unless form
+            (error "Dosya boş: ~A" pathname))
+          (apply-level-to-current-grid form canvas)
+          (format t "Level yüklendi: ~A~%" pathname)))
+    (error (e)
+      (format *error-output* "~&[LEVEL-LOAD] Hata: ~A~%" e))))
+
+(defun load-level-dialog (&optional canvas)
+  "Dosya seçim diyalogu aç ve seçilen level’i yükle."
+  (let ((path (get-open-file
+               :filetypes '(("Lisp files" "*.lisp")
+                            ("All files" "*.*")))))
+    (when path
+      (load-level-from-file path canvas))))
 
 ;;;------------------------------------------------------------
 ;;; Canvas ve tile güncelleme
@@ -175,7 +237,7 @@ Toggle DEĞİL; hücreyi doğrudan *current-tool* ile boyar."
 ;;;------------------------------------------------------------
 
 (defun init-toolbar (master)
-  "Üstte basit bir toolbar: araç seçimi + kaydet."
+  "Üstte basit bir toolbar: araç seçimi + kaydet + yükle."
   (let ((frame (make-instance 'frame :master master)))
     ;; 1. satır: temel şeyler
     ;; Boş
@@ -240,14 +302,25 @@ Toggle DEĞİL; hücreyi doğrudan *current-tool* ile boyar."
                            :master frame
                            :text "Dekor"
                            :command (lambda ()
-                                      (setf *current-tool* :decorations-and-background-anims)))))
+                                      (setf *current-tool*
+                                            :decorations-and-background-anims)))))
       (grid btn-decor 1 2 :padx 4 :pady 4))
 
-    ;; Kaydet butonu (sağ tarafa)
+    ;; Yükle…
+    (let ((btn-load (make-instance 'button
+                          :master frame
+                          :text "Yükle…"
+                          :command (lambda ()
+                                     (if *canvas*
+                                         (load-level-dialog *canvas*)
+                                         (format t "Canvas henüz hazır değil.~%"))))))
+      (grid btn-load 1 3 :padx 4 :pady 4))
+
+    ;; Kaydet…
     (let ((btn-save (make-instance 'button
-                         :master frame
-                         :text "Kaydet…"
-                         :command #'save-level-dialog)))
+                          :master frame
+                          :text "Kaydet…"
+                          :command #'save-level-dialog)))
       (grid btn-save 1 4 :padx 10 :pady 4))
 
     frame))
@@ -275,9 +348,12 @@ Anahtar argümanlar:
     (wm-title *tk* "REAKT Lemmings Level Editor")
 
     ;; Ana frame
-    (let* ((main    (make-instance 'frame :master *tk*))
-           (toolbar (init-toolbar main))
-           (canvas  (init-canvas main)))
+    (let* ((main   (make-instance 'frame :master *tk*))
+           (canvas (init-canvas main))
+           (toolbar (init-toolbar main)))
+      ;; Canvas’ı globale yaz ki 'Yükle…' butonu kullanabilsin
+      (setf *canvas* canvas)
+
       ;; Toolbar üstte, canvas altta
       (pack toolbar :side :top :fill :x)
       (pack canvas  :side :top :fill :both :expand t)
