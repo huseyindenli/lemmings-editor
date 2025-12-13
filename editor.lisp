@@ -2,6 +2,8 @@
 
 (in-package #:lemmings-editor)
 
+;; (start-editor :cols 40 :rows 30 :tile-size 24)
+
 ;;;------------------------------------------------------------
 ;;; Grid / Level verisi (esnek geometri)
 ;;;------------------------------------------------------------
