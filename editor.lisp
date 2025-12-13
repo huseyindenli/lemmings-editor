@@ -46,10 +46,10 @@
 
 ;; Level özellikleri (metadata)
 (defparameter *level-meta*
-  (list :name             "Yeni Level"
-        :lemmings-total   10
+  (list :name              "Yeni Level"
+        :lemmings-total    10
         :lemmings-required 10
-        :time-limit-sec   300))
+        :time-limit-sec    300))
 
 (defun normalize-level-meta (meta)
   "Eksik anahtarları varsayılanlarla doldur."
@@ -79,7 +79,6 @@
         (if n n default))
     (error () default)))
 
-
 ;;;------------------------------------------------------------
 ;;; Tile tipleri ve renkler
 ;;;------------------------------------------------------------
@@ -88,7 +87,7 @@
   '((:empty   "Boş"                             "black")
     (:ground  "Zemin"                           "sienna3")
     (:steel   "Çelik (kırılamaz)"               "lightsteelblue3")
-    (:spawn   "Çıkış Noktası (Spawn)"          "cyan3")
+    (:spawn   "Çıkış Noktası (Spawn)"           "cyan3")
     (:exit    "Çıkış Kapısı"                    "gold")
     (:can-be-excavated "Kazılabilir zemin"      "chocolate3")
     (:contacts "Temas (tehlike/bonus)"          "red3")
@@ -172,29 +171,49 @@ Format:
 (defun apply-level-to-current-grid (level &optional canvas)
   "LEVEL s-exp’ini mevcut *grid* (+ opsiyonel CANVAS) üzerine uygular.
 
-LEVEL formatı:
-  (:width W :height H :tiles ((row0) (row1) ...))"
-  (let* ((w (getf level :width))
-         (h (getf level :height))
-         (tiles (getf level :tiles)))
+LEVEL formatı eski / yeni olabilir:
+  (:width W :height H :tiles ((row0) (row1) ...))
+veya
+  (:width W :height H :tile-size TS
+   :meta (:name ... :lemmings-total ... ...)
+   :tiles ((row0) (row1) ...))"
+  (let* ((w     (getf level :width))
+         (h     (getf level :height))
+         (tiles (getf level :tiles))
+         (meta  (normalize-level-meta (getf level :meta)))
+         (ts    (or (getf level :tile-size) *tile-size*)))
     ;; Basit format kontrolleri
     (unless (and (integerp w) (integerp h)
                  (> w 0) (> h 0)
                  (listp tiles))
       (error "Geçersiz level formatı: ~S" level))
 
-    ;; Şimdilik: dosyadaki boyutlar mevcut grid ile aynı olmalı
+    ;; Geometri uyumu kontrolü (şimdilik zorunlu)
     (when (or (/= w *grid-width*)
               (/= h *grid-height*))
       (error "Level boyutu uymuyor. Dosya: (~D x ~D), Editor: (~D x ~D)"
              w h *grid-width* *grid-height*))
+
+    ;; Tile-size farklıysa şimdilik sadece uyar, değeri koru.
+    (when (/= ts *tile-size*)
+      (format *error-output*
+              "~&[LEVEL-LOAD] Uyarı: tile-size dosyada ~D, editörde ~D.~%"
+              ts *tile-size*))
+
+    ;; metadata'yı güncelle
+    (setf *level-meta* meta)
+    (when canvas
+      (wm-title *tk*
+                (format nil
+                        "REAKT Lemmings Level Editor - ~A"
+                        (getf *level-meta* :name))))
 
     ;; Grid’i doldur
     (dotimes (y *grid-height*)
       (let ((row (nth y tiles)))
         (dotimes (x *grid-width*)
           (let* ((tile (and row (nth x row)))
-                 ;; Bilinmeyen tile tiplerini :empty’ye düşürelim
+                 ;; Bilinmeyen tile tiplerini :empty'ye düşürelim
                  (safe-tile (if (member tile
                                         '(:empty :ground :steel :spawn :exit
                                           :can-be-excavated :contacts
@@ -213,17 +232,20 @@ LEVEL formatı:
           (unless form
             (error "Dosya boş: ~A" pathname))
           (apply-level-to-current-grid form canvas)
-          (format t "Level yüklendi: ~A~%" pathname)))
+          (setf *current-level-path* (truename pathname))
+          (format t "Level yüklendi: ~A~%" *current-level-path*)
+          t))
     (error (e)
-      (format *error-output* "~&[LEVEL-LOAD] Hata: ~A~%" e))))
+      (format *error-output* "~&[LEVEL-LOAD] Hata: ~A~%" e)
+      nil)))
 
-(defun load-level-dialog (&optional canvas)
+(defun load-level-dialog ()
   "Dosya seçim diyalogu aç ve seçilen level’i yükle."
   (let ((path (get-open-file
-               :filetypes '(("Lisp files" "*.lisp")
+               :filetypes '(("Lisp level files" "*.lisp")
                             ("All files" "*.*")))))
     (when path
-      (load-level-from-file path canvas))))
+      (load-level-from-file path *canvas*))))
 
 ;;;------------------------------------------------------------
 ;;; Canvas ve tile güncelleme
@@ -282,10 +304,11 @@ Toggle DEĞİL; hücreyi doğrudan *current-tool* ile boyar."
                (y0 (* row *tile-size*))
                (x1 (+ x0 *tile-size*))
                (y1 (+ y0 *tile-size*))
-               (id (create-rectangle canvas x0 y0 x1 y1)))
+               (id (create-rectangle canvas x0 y0 x1 y1))
+               (tile (aref *grid* row col)))
           ;; Çerçeve ve dolgu renklerini ayarla
           (itemconfigure canvas id "outline" "gray30")
-          (itemconfigure canvas id "fill" (tile->color :empty))
+          (itemconfigure canvas id "fill" (tile->color tile))
           ;; Canvas id’sini kaydet
           (setf (aref *rects* row col) id))))
 
@@ -302,7 +325,7 @@ Toggle DEĞİL; hücreyi doğrudan *current-tool* ile boyar."
     canvas))
 
 ;;;------------------------------------------------------------
-;;; Toolbar (palette + kaydet)
+;;; Toolbar (palette + kaydet + özellikler)
 ;;;------------------------------------------------------------
 
 (defun open-level-properties-dialog ()
@@ -330,11 +353,11 @@ Toggle DEĞİL; hücreyi doğrudan *current-tool* ile boyar."
       ;; Satır yerleşimi
       (labels ((row (r label widget)
                  (let ((lbl (make-instance 'label :master frame :text label)))
-                   (grid lbl    r 0 :sticky "w" :padx 4 :pady 2)
+                   (grid lbl    r 0 :sticky "w"  :padx 4 :pady 2)
                    (grid widget r 1 :sticky "ew" :padx 4 :pady 2))))
-        (row 0 "Level adı:"          name-entry)
-        (row 1 "Toplam lemming:"    total-entry)
-        (row 2 "Gerekli lemming:"   required-entry)
+        (row 0 "Level adı:"              name-entry)
+        (row 1 "Toplam lemming:"        total-entry)
+        (row 2 "Gerekli lemming:"       required-entry)
         (row 3 "Süre (sn, 0=limitsiz):" time-entry))
 
       (grid-columnconfigure frame 1 :weight 1)
@@ -343,39 +366,39 @@ Toggle DEĞİL; hücreyi doğrudan *current-tool* ile boyar."
       (let ((btn-frame (make-instance 'frame :master frame)))
         (grid btn-frame 4 0 :columnspan 2 :sticky "e" :padx 4 :pady 4)
         (let ((ok (make-instance 'button
-                       :master btn-frame
-                       :text "Tamam"
-                       :command
-                       (lambda ()
-                         (let* ((name (string-trim " " (or (text name-entry) "")))
-                                (total (parse-int-or-default
-                                        (text total-entry)
-                                        (or (getf *level-meta* :lemmings-total)
-                                            10)))
-                                (required (parse-int-or-default
-                                           (text required-entry)
-                                           (or (getf *level-meta* :lemmings-required)
-                                               10)))
-                                (time (parse-int-or-default
-                                       (text time-entry)
-                                       (or (getf *level-meta* :time-limit-sec)
-                                           300))))
-                           (setf *level-meta*
-                                 (normalize-level-meta
-                                  (list :name             name
-                                        :lemmings-total   total
-                                        :lemmings-required required
-                                        :time-limit-sec   time)))
-                           ;; Ana pencere başlığını güncelle
-                           (wm-title *tk*
-                                     (format nil
-                                             "REAKT Lemmings Level Editor - ~A"
-                                             (getf *level-meta* :name)))
-                           (destroy tl))))
+                      :master btn-frame
+                      :text "Tamam"
+                      :command
+                      (lambda ()
+                        (let* ((name (string-trim " " (or (text name-entry) "")))
+                               (total (parse-int-or-default
+                                       (text total-entry)
+                                       (or (getf *level-meta* :lemmings-total)
+                                           10)))
+                               (required (parse-int-or-default
+                                          (text required-entry)
+                                          (or (getf *level-meta* :lemmings-required)
+                                              10)))
+                               (time (parse-int-or-default
+                                      (text time-entry)
+                                      (or (getf *level-meta* :time-limit-sec)
+                                          300))))
+                          (setf *level-meta*
+                                (normalize-level-meta
+                                 (list :name              name
+                                       :lemmings-total    total
+                                       :lemmings-required required
+                                       :time-limit-sec    time)))
+                          ;; Ana pencere başlığını güncelle
+                          (wm-title *tk*
+                                    (format nil
+                                            "REAKT Lemmings Level Editor - ~A"
+                                            (getf *level-meta* :name)))
+                          (destroy tl)))))
               (cancel (make-instance 'button
-                          :master btn-frame
-                          :text "İptal"
-                          :command (lambda () (destroy tl)))))
+                        :master btn-frame
+                        :text "İptal"
+                        :command (lambda () (destroy tl)))))
           (pack ok     :side :right :padx 4 :pady 2)
           (pack cancel :side :right :padx 4 :pady 2))))))
 
@@ -386,28 +409,30 @@ Toggle DEĞİL; hücreyi doğrudan *current-tool* ile boyar."
     ;; Tile butonları (Boş, Zemin, Çelik, Spawn, Exit, ...)
     (loop for (key label _color) in *tile-types*
           for col from 0 do
-            (let ((btn (make-instance 'button
-				      :master frame
-				      :text   label
-				      :command (lambda ()
-						 (setf *current-tool* key)))))
+            ;; ÖNEMLİ: key'i her buton için ayrı bir değişkende yakalıyoruz
+            (let* ((tool-key key)
+                   (btn (make-instance 'button
+                                       :master frame
+                                       :text   label
+                                       :command (lambda ()
+                                                  (setf *current-tool* tool-key)))))
               (grid btn 0 col :padx 4 :pady 4)))
 
     ;; Aç / Kaydet / Özellikler butonları
     (let ((btn-load (make-instance 'button
-				   :master frame
-				   :text "Aç…"
-				   :command #'load-level-dialog))
+                                   :master frame
+                                   :text "Aç…"
+                                   :command #'load-level-dialog))
           (btn-save (make-instance 'button
-				   :master frame
-				   :text "Kaydet…"
-				   :command #'save-level-dialog))
+                                   :master frame
+                                   :text "Kaydet…"
+                                   :command #'save-level-dialog))
           (btn-props (make-instance 'button
-				    :master frame
-				    :text "Özellikler…"
-				    :command #'open-level-properties-dialog)))
-      (grid btn-load 0 n       :padx 10 :pady 4)
-      (grid btn-save 0 (1+ n)  :padx 4  :pady 4)
+                                    :master frame
+                                    :text "Özellikler…"
+                                    :command #'open-level-properties-dialog)))
+      (grid btn-load 0 n        :padx 10 :pady 4)
+      (grid btn-save 0 (1+ n)   :padx 4  :pady 4)
       (grid btn-props 0 (+ n 2) :padx 4  :pady 4))
     frame))
 
@@ -418,7 +443,7 @@ Toggle DEĞİL; hücreyi doğrudan *current-tool* ile boyar."
 (defun start-editor (&key (cols *grid-width*)
                           (rows *grid-height*)
                           (tile-size *tile-size*))
-  "Basit Lemmings seviye editörü iskeleti: grid + toolbar.
+  "Basit Lemmings seviye editörü: grid + toolbar.
 
 Anahtar argümanlar:
   :cols      -> grid sütun sayısı
@@ -430,103 +455,18 @@ Anahtar argümanlar:
   ;; UI açılmadan önce geometriyi ayarla
   (reconfigure-grid :cols cols :rows rows :tile-size tile-size)
   (with-ltk ()
-    ;; Ana pencere başlığı
-    (wm-title *tk* "REAKT Lemmings Level Editor")
-
-    ;; Ana frame
-    (let* ((main   (make-instance 'frame :master *tk*))
-           (canvas (init-canvas main))
-           (toolbar (init-toolbar main)))
-      ;; Canvas’ı globale yaz ki 'Yükle…' butonu kullanabilsin
-      (setf *canvas* canvas)
-
-      ;; Toolbar üstte, canvas altta
-      (pack toolbar :side :top :fill :x)
-      (pack canvas  :side :top :fill :both :expand t)
-      (pack main    :side :top :fill :both :expand t))))
-
-(defun apply-level-from-sexp (spec)
-  "(:width ... :height ... :tile-size ... :meta ... :tiles ...) şeklindeki
-s-exp’ten grid ve *level-meta*’yı doldurur.
-
-Eski format dosyalarda (:tile-size ve :meta yoksa) varsayılan değerler kullanılır."
-  (let* ((w     (or (getf spec :width)  *grid-width*))
-         (h     (or (getf spec :height) *grid-height*))
-         (ts    (or (getf spec :tile-size) *tile-size*))
-         (meta  (normalize-level-meta (getf spec :meta)))
-         (tiles (getf spec :tiles)))
-    (reinit-grid w h ts)
-    (setf *level-meta* meta)
-    ;; tiles içeriğini *grid*’e yaz
-    (when tiles
-      (dotimes (y (min h (length tiles)))
-        (let ((row (nth y tiles)))
-          (when row
-            (dotimes (x (min w (length row)))
-              (setf (aref *grid* y x) (nth x row))))))))
-  t)
-
-(defun load-level-from-file (pathname)
-  "Verilen dosyadaki s-exp level tanımını okuyup uygular."
-  (handler-case
-      (with-open-file (in pathname :direction :input)
-        (let ((form (read in nil nil)))
-          (if (null form)
-              (progn
-                (format *error-output*
-                        "[LEVEL-LOAD] Hata: Dosya boş: ~A~%" pathname)
-                nil)
-              (progn
-                (apply-level-from-sexp form)
-                (setf *current-level-path* (truename pathname))
-                (format t "Level yüklendi: ~A~%" *current-level-path*)
-                t))))
-    (error (e)
-      (format *error-output* "[LEVEL-LOAD] Hata: ~A~%" e)
-      nil)))
-
-(defun load-level-dialog ()
-  "Kullanıcıya dosya seçtirip level yükler."
-  (let ((path (get-open-file
-               :filetypes '(("Lisp level files" "*.lisp")
-                            ("All files"       "*.*")))))
-    (when path
-      (load-level-from-file path))))
-
-(defun ensure-level-loaded-or-new (cols rows tile-size)
-  "Varsayılan level dosyası varsa onu yükler; yoksa yeni boş level oluşturur."
-  (let ((path (default-level-path)))
-    (if (probe-file path)
-        ;; Dosya varsa: okumaya çalış
-        (unless (load-level-from-file path)
-          ;; Yükleme başarısızsa boş level oluştur
-          (reinit-grid cols rows tile-size)
-          (setf *level-meta* (normalize-level-meta nil)))
-        ;; Dosya yoksa: boş level oluştur ve hemen kaydet
-        (progn
-          (reinit-grid cols rows tile-size)
-          (setf *level-meta* (normalize-level-meta nil))
-          (save-level-to-file path)))))
-
-(defun start-editor (&key (cols 40) (rows 15) (tile-size 24))
-  "Basit Lemmings seviye editörü: grid + toolbar.
-
-İlk açılışta varsayılan test-level.lisp varsa onu yükler,
-yoksa boş bir level oluşturup kaydeder."
-  (with-ltk ()
-    ;; Level verisini hazırla (grid + meta)
-    (ensure-level-loaded-or-new cols rows tile-size)
-
-    ;; Pencere başlığında level ismini göster
+    ;; Ana pencere başlığı (mevcut metadata'dan)
     (wm-title *tk*
               (format nil "REAKT Lemmings Level Editor - ~A"
                       (getf *level-meta* :name)))
 
     ;; Ana frame
-    (let* ((main    (make-instance 'frame :master *tk*))
+    (let* ((main   (make-instance 'frame :master *tk*))
            (toolbar (init-toolbar main))
-           (canvas  (init-canvas main)))
-      (declare (ignore toolbar))
+           (canvas (init-canvas main)))
+      ;; Canvas’ı globale yaz ki 'Aç…' butonu kullanabilsin
+      (setf *canvas* canvas)
+
       ;; Toolbar üstte, canvas altta
       (pack toolbar :side :top :fill :x)
       (pack canvas  :side :top :fill :both :expand t)
