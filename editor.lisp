@@ -264,6 +264,140 @@ veya
       (itemconfigure canvas rect "fill" (tile->color tile)))))
 
 ;;;------------------------------------------------------------
+;;; Canvas kamera (pan) + zoom  (LTK sürüm bağımsız: SEND-WISH)
+;;;------------------------------------------------------------
+
+(defparameter *scroll-step-tiles* 1)
+(defparameter *scroll-step-tiles-fast* 6)
+
+;; Kamera offset’i (ekranda görünen sol-üst köşenin world px karşılığı)
+(defparameter *canvas-cam-x* 0.0)
+(defparameter *canvas-cam-y* 0.0)
+
+;; Zoom (1.0 = normal). Tile-size küçükken büyütmek için.
+(defparameter *canvas-zoom* 1.0)
+(defparameter *canvas-zoom-min* 0.25)
+(defparameter *canvas-zoom-max* 8.0)
+(defparameter *canvas-zoom-step* 0.25)
+
+(defun reset-canvas-camera! ()
+  (setf *canvas-cam-x* 0.0
+        *canvas-cam-y* 0.0))
+
+(defun effective-tile-size ()
+  "Ekrandaki (zoom uygulanmış) tile piksel boyutu."
+  (* (float *tile-size* 1.0) (float *canvas-zoom* 1.0)))
+
+(defun %ltk-fbound (name)
+  "LTK paketinde NAME isimli fbound sembolü bul."
+  (let ((pkg (find-package :ltk)))
+    (when pkg
+      (multiple-value-bind (sym status) (find-symbol name pkg)
+        (declare (ignore status))
+        (when (and sym (fboundp sym)) sym)))))
+
+(defun %canvas-tk-path (canvas)
+  (let* ((path-sym (%ltk-fbound "WIDGET-PATH")))
+    (or (and path-sym (funcall (symbol-function path-sym) canvas))
+        (ignore-errors (slot-value canvas (find-symbol "PATH" (find-package :ltk))))
+        (ignore-errors (slot-value canvas (find-symbol "NAME" (find-package :ltk))))
+        (error "Canvas Tk path bulunamadı."))))
+
+(defun %send-wish (fmt &rest args)
+  (let ((send-sym (%ltk-fbound "SEND-WISH")))
+    (unless send-sym
+      (error "LTK'da SEND-WISH bulunamadı."))
+    (funcall (symbol-function send-sym)
+             (apply #'format nil fmt args))))
+
+(defun %canvas-move-all (canvas dx dy)
+  "Canvas içindeki tüm item’ları dx/dy kadar kaydır. (HER ZAMAN send-wish)"
+  (let ((path (%canvas-tk-path canvas)))
+    (%send-wish "~a move all ~d ~d" path (truncate dx) (truncate dy))
+    t))
+
+(defun %canvas-scale-all (canvas ratio)
+  "Canvas içindeki tüm item’ları oranla ölçekle. (0,0 etrafında)"
+  (let ((path (%canvas-tk-path canvas)))
+    ;; ratio float olabilir
+    (%send-wish "~a scale all 0 0 ~,6F ~,6F" path (float ratio 1.0) (float ratio 1.0))
+    t))
+
+(defun set-canvas-zoom! (canvas new-zoom)
+  "Zoom değiştir: tüm item’ları scale et + kamera offset’ini aynı oranda çarp."
+  (let* ((old (float *canvas-zoom* 1.0))
+         (nz  (float new-zoom 1.0))
+         (nz  (max *canvas-zoom-min* (min *canvas-zoom-max* nz)))
+         (ratio (if (zerop old) 1.0 (/ nz old))))
+    (when (and canvas (not (= ratio 1.0)))
+      (%canvas-scale-all canvas ratio)
+      (setf *canvas-cam-x* (* *canvas-cam-x* ratio)
+            *canvas-cam-y* (* *canvas-cam-y* ratio)))
+    (setf *canvas-zoom* nz)
+    nz))
+
+(defun zoom-in! (canvas)
+  (set-canvas-zoom! canvas (+ *canvas-zoom* *canvas-zoom-step*)))
+
+(defun zoom-out! (canvas)
+  (set-canvas-zoom! canvas (- *canvas-zoom* *canvas-zoom-step*)))
+
+(defun zoom-reset! (canvas)
+  (set-canvas-zoom! canvas 1.0))
+
+(defun default-zoom-for-tile-size (ts)
+  "Tile-size çok küçükse başlangıçta otomatik büyüt."
+  (let ((z (/ 24.0 (max 1.0 (float ts 1.0)))))
+    (max 1.0 (min 6.0 z))))
+
+(defun event->world-xy (evt)
+  "Event (window) coords -> world coords (kamera offset eklenmiş).
+DİKKAT: world burada 'zoom uygulanmış pixel space' (screen unit) gibi davranır."
+  (values (+ (float (event-x evt) 1.0) *canvas-cam-x*)
+          (+ (float (event-y evt) 1.0) *canvas-cam-y*)))
+
+(defun canvas-pan-tiles (canvas dx-tiles dy-tiles &key fast?)
+  "Ok tuşlarıyla pan: dünyayı kaydır (kamera). Zoom’a göre px hesabı."
+  (let* ((step (if fast? *scroll-step-tiles-fast* *scroll-step-tiles*))
+         (ts   (effective-tile-size))
+         (dx   (* dx-tiles step ts))
+         (dy   (* dy-tiles step ts)))
+    (when (or (/= dx 0.0) (/= dy 0.0))
+      (incf *canvas-cam-x* dx)
+      (incf *canvas-cam-y* dy)
+      (%canvas-move-all canvas (- dx) (- dy)))))
+
+(defun handle-canvas-click (canvas evt)
+  "Canvas’e tıkla: (kamera+zoom) world’e çevirip tile bulur."
+  (focus canvas)
+  (multiple-value-bind (px py) (event->world-xy evt)
+    (let ((ts (effective-tile-size)))
+      (multiple-value-bind (gx _) (floor px ts)
+        (declare (ignore _))
+        (multiple-value-bind (gy __) (floor py ts)
+          (declare (ignore __))
+          (when (and (>= gx 0) (< gx *grid-width*)
+                     (>= gy 0) (< gy *grid-height*))
+            (let* ((old (aref *grid* gy gx))
+                   (new (if (eql old *current-tool*) :empty *current-tool*)))
+              (setf (aref *grid* gy gx) new)
+              (update-tile-on-canvas canvas gx gy))))))))
+
+(defun handle-canvas-paint (canvas evt)
+  "Sol tuş basılı sürükleme: fırça. (kamera+zoom) world’e çevir."
+  (focus canvas)
+  (multiple-value-bind (px py) (event->world-xy evt)
+    (let ((ts (effective-tile-size)))
+      (multiple-value-bind (gx _) (floor px ts)
+        (declare (ignore _))
+        (multiple-value-bind (gy __) (floor py ts)
+          (declare (ignore __))
+          (when (and (>= gx 0) (< gx *grid-width*)
+                     (>= gy 0) (< gy *grid-height*))
+            (setf (aref *grid* gy gx) *current-tool*)
+            (update-tile-on-canvas canvas gx gy)))))))
+
+;;;------------------------------------------------------------
 ;;; Canvas "kamera" (scroll) + event coord fix
 ;;;------------------------------------------------------------
 
@@ -408,7 +542,7 @@ LTK:MOVE bazı sürümlerde widget move’dur; canvas item move için ITEMMOVE g
 
 (defun init-canvas (parent)
   "Grid çizen ve tıklamaları yakalayan canvas yarat.
-Ok tuşları ile 'kamera' kaydırma: TK-CALL yok; item'ları move ile kaydırıyoruz."
+Ok tuşları: pan.  +/- : zoom. 0: reset zoom."
   (let* ((canvas (make-instance 'canvas
                                 :master parent
                                 :width  800
@@ -416,10 +550,11 @@ Ok tuşları ile 'kamera' kaydırma: TK-CALL yok; item'ları move ile kaydırıy
                                 :background "gray20")))
     (setf *canvas* canvas)
 
-    ;; Kamera offset sıfırla (global pan sistemi)
+    ;; Kamera/zoom başlangıç
     (reset-canvas-camera!)
+    (setf *canvas-zoom* 1.0)
 
-    ;; rect'leri oluştur
+    ;; rect'leri oluştur (BASE coords: *tile-size* ile)
     (dotimes (gy *grid-height*)
       (dotimes (gx *grid-width*)
         (let* ((x0 (* gx *tile-size*))
@@ -427,13 +562,15 @@ Ok tuşları ile 'kamera' kaydırma: TK-CALL yok; item'ları move ile kaydırıy
                (x1 (+ x0 *tile-size*))
                (y1 (+ y0 *tile-size*))
                (tile (aref *grid* gy gx))
-               ;; ÖNEMLİ: create-rectangle keyword kabul etmeyen LTK'lar var
                (rect (create-rectangle canvas x0 y0 x1 y1)))
           (setf (aref *rects* gy gx) rect)
           (itemconfigure canvas rect "fill" (tile->color tile))
           (itemconfigure canvas rect "outline" "gray35"))))
 
     (pack canvas :side :top :fill :both :expand t)
+
+    ;; Tile-size küçükse otomatik zoom (8 gibi)
+    (set-canvas-zoom! canvas (default-zoom-for-tile-size *tile-size*))
 
     ;; focus
     (bind canvas "<Enter>"
@@ -456,6 +593,12 @@ Ok tuşları ile 'kamera' kaydırma: TK-CALL yok; item'ları move ile kaydırıy
     (bind canvas "<Shift-KeyPress-Down>"  (lambda (evt) (declare (ignore evt)) (canvas-pan-tiles canvas 0  1 :fast? t)))
     (bind canvas "<Shift-KeyPress-Left>"  (lambda (evt) (declare (ignore evt)) (canvas-pan-tiles canvas -1 0 :fast? t)))
     (bind canvas "<Shift-KeyPress-Right>" (lambda (evt) (declare (ignore evt)) (canvas-pan-tiles canvas  1 0 :fast? t)))
+
+    ;; ZOOM: + / = (zoom in), - (zoom out), 0 (reset)
+    (bind canvas "<KeyPress-plus>"  (lambda (evt) (declare (ignore evt)) (zoom-in! canvas)))
+    (bind canvas "<KeyPress-equal>" (lambda (evt) (declare (ignore evt)) (zoom-in! canvas)))
+    (bind canvas "<KeyPress-minus>" (lambda (evt) (declare (ignore evt)) (zoom-out! canvas)))
+    (bind canvas "<KeyPress-0>"     (lambda (evt) (declare (ignore evt)) (zoom-reset! canvas)))
 
     (focus canvas)
     canvas))
