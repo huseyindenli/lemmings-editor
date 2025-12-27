@@ -6,6 +6,13 @@
 ;; tam ekran
 ;; (start-editor :cols 80 :rows 45 :tile-size 24) 
 
+;; Kullanım
+;; Ok tuşları: pan
+;; Shift + ok: hızlı pan
+;; + / =: zoom in
+;; -: zoom out
+;; 0: zoom reset (1.0)
+
 ;;;------------------------------------------------------------
 ;;; Grid / Level verisi (esnek geometri)
 ;;;------------------------------------------------------------
