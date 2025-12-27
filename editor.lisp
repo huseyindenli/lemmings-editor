@@ -3,6 +3,8 @@
 (in-package #:lemmings-editor)
 
 ;; (start-editor :cols 40 :rows 30 :tile-size 24)
+;; tam ekran
+;; (start-editor :cols 80 :rows 45 :tile-size 24) 
 
 ;;;------------------------------------------------------------
 ;;; Grid / Level verisi (esnek geometri)
@@ -261,69 +263,201 @@ veya
       ;; LTK’de option isimleri string, renk de string olmalı
       (itemconfigure canvas rect "fill" (tile->color tile)))))
 
+;;;------------------------------------------------------------
+;;; Canvas "kamera" (scroll) + event coord fix
+;;;------------------------------------------------------------
+
+(defparameter *scroll-step-tiles* 1)
+(defparameter *scroll-step-tiles-fast* 6)
+
+;;;------------------------------------------------------------
+;;; Canvas "kamera" (pan) + event coord fix  (LTK sürüm bağımsız)
+;;;------------------------------------------------------------
+
+(defparameter *canvas-cam-x* 0.0)  ;; world pixel offset (viewport origin -> world)
+(defparameter *canvas-cam-y* 0.0)
+
+(defun reset-canvas-camera! ()
+  (setf *canvas-cam-x* 0.0
+        *canvas-cam-y* 0.0))
+
+(defparameter *scroll-step-tiles* 1)
+(defparameter *scroll-step-tiles-fast* 6)
+
+(defun %ltk-fbound (name)
+  "LTK paketinde NAME isimli fbound sembolü bul (export edilse de edilmezse de)."
+  (let ((pkg (find-package :ltk)))
+    (when pkg
+      (multiple-value-bind (sym status) (find-symbol name pkg)
+        (declare (ignore status))
+        (when (and sym (fboundp sym)) sym)))))
+
+(defun %canvas-move-all (canvas dx dy)
+  "Canvas içindeki tüm item’ları dx/dy kadar kaydır.
+LTK:MOVE bazı sürümlerde widget move’dur; canvas item move için ITEMMOVE gerekir."
+  (let ((dx (truncate dx))
+        (dy (truncate dy)))
+
+    ;; 1) Tercih: LTK itemmove wrapper'ı
+    (let ((itemmove-sym (%ltk-fbound "ITEMMOVE")))
+      (when itemmove-sym
+        (funcall (symbol-function itemmove-sym) canvas "all" dx dy)
+        (return-from %canvas-move-all t)))
+
+    ;; 2) Fallback: SEND-WISH ile ham Tcl komutu
+    (let* ((send-sym (%ltk-fbound "SEND-WISH"))
+           (path-sym (%ltk-fbound "WIDGET-PATH")))
+      (unless send-sym
+        (error "LTK'da ITEMMOVE yok ve SEND-WISH de yok. Canvas pan yapılamıyor."))
+
+      (let ((path (or (and path-sym (funcall (symbol-function path-sym) canvas))
+                      (ignore-errors (slot-value canvas (find-symbol "PATH" (find-package :ltk))))
+                      (ignore-errors (slot-value canvas (find-symbol "NAME" (find-package :ltk))))
+                      (error "Canvas Tk path bulunamadı."))))
+        (funcall (symbol-function send-sym)
+                 (format nil "~a move all ~d ~d" path dx dy)))
+      t)))
+
+(defun event->world-xy (evt)
+  "Event (window) coords -> world coords (kamera offset eklenmiş)."
+  (values (+ (float (event-x evt) 1.0) *canvas-cam-x*)
+          (+ (float (event-y evt) 1.0) *canvas-cam-y*)))
+
+(defun canvas-pan-tiles (canvas dx-tiles dy-tiles &key fast?)
+  "Ok tuşlarıyla pan: dünyayı kaydır (kamera)."
+  (let* ((step (if fast? *scroll-step-tiles-fast* *scroll-step-tiles*))
+         (dx   (* dx-tiles step *tile-size*))   ;; px
+         (dy   (* dy-tiles step *tile-size*)))  ;; px
+    (when (or (/= dx 0) (/= dy 0))
+      ;; Kamera world origin'i ileri gider
+      (incf *canvas-cam-x* (float dx 1.0))
+      (incf *canvas-cam-y* (float dy 1.0))
+      ;; Görünen pencere sabit, item’ları ters yönde kaydır
+      (%canvas-move-all canvas (- dx) (- dy)))))
+
+
+
+;; ------------------------------------------------------------
+;; Canvas "kamera" (pan)  (LTK sürüm bağımsız)
+;; ------------------------------------------------------------
+
+(defparameter *scroll-step-tiles* 1)
+(defparameter *scroll-step-tiles-fast* 6)
+
+(defparameter *canvas-cam-x* 0.0)  ;; world pixel offset (viewport origin -> world)
+(defparameter *canvas-cam-y* 0.0)
+
+(defun reset-canvas-camera! ()
+  (setf *canvas-cam-x* 0.0
+        *canvas-cam-y* 0.0))
+
+(defun %ltk-fbound (name)
+  "LTK paketinde NAME isimli fbound sembolü bul (export edilse de edilmese de)."
+  (let ((pkg (find-package :ltk)))
+    (when pkg
+      (multiple-value-bind (sym status) (find-symbol name pkg)
+        (declare (ignore status))
+        (when (and sym (fboundp sym)) sym)))))
+
+(defun event->world-xy (evt)
+  "Event (window) coords -> world coords (kamera offset eklenmiş)."
+  (values (+ (float (event-x evt) 1.0) *canvas-cam-x*)
+          (+ (float (event-y evt) 1.0) *canvas-cam-y*)))
+
+(defun canvas-pan-tiles (canvas dx-tiles dy-tiles &key fast?)
+  "Ok tuşlarıyla pan: dünyayı kaydır (kamera)."
+  (let* ((step (if fast? *scroll-step-tiles-fast* *scroll-step-tiles*))
+         (dx   (* dx-tiles step *tile-size*))   ;; px
+         (dy   (* dy-tiles step *tile-size*)))  ;; px
+    (when (or (/= dx 0) (/= dy 0))
+      (incf *canvas-cam-x* (float dx 1.0))
+      (incf *canvas-cam-y* (float dy 1.0))
+      ;; item’ları ters yönde kaydır
+      (%canvas-move-all canvas (- dx) (- dy)))))
+
 (defun handle-canvas-click (canvas evt)
-  "Canvas’e tıklandığında çağrılır. Pikselden tile koordinatına çevirip toggle yapar."
-  (multiple-value-bind (gx _) (floor (event-x evt) *tile-size*)
-    (declare (ignore _))
-    (multiple-value-bind (gy __) (floor (event-y evt) *tile-size*)
-      (declare (ignore __))
-      (when (and (>= gx 0) (< gx *grid-width*)
-                 (>= gy 0) (< gy *grid-height*))
-        ;; TIKLAMA DAVRANIŞI: toggle
-        (let* ((old (aref *grid* gy gx))
-               (new (if (eql old *current-tool*)
-                        :empty
-                        *current-tool*)))
-          (setf (aref *grid* gy gx) new)
-          (update-tile-on-canvas canvas gx gy))))))
+  "Canvas’e tıklandığında çağrılır. (kamera varsa) world’e çevirip tile bulur."
+  (focus canvas)
+  (multiple-value-bind (px py) (event->world-xy evt)
+    (multiple-value-bind (gx _) (floor px *tile-size*)
+      (declare (ignore _))
+      (multiple-value-bind (gy __) (floor py *tile-size*)
+        (declare (ignore __))
+        (when (and (>= gx 0) (< gx *grid-width*)
+                   (>= gy 0) (< gy *grid-height*))
+          ;; TIKLAMA: toggle
+          (let* ((old (aref *grid* gy gx))
+                 (new (if (eql old *current-tool*)
+                          :empty
+                          *current-tool*)))
+            (setf (aref *grid* gy gx) new)
+            (update-tile-on-canvas canvas gx gy)))))))
 
 (defun handle-canvas-paint (canvas evt)
-  "Sol tuş basılı iken sürükleme (B1-Motion) ile boyama.
-Toggle DEĞİL; hücreyi doğrudan *current-tool* ile boyar."
-  (multiple-value-bind (gx _) (floor (event-x evt) *tile-size*)
-    (declare (ignore _))
-    (multiple-value-bind (gy __) (floor (event-y evt) *tile-size*)
-      (declare (ignore __))
-      (when (and (>= gx 0) (< gx *grid-width*)
-                 (>= gy 0) (< gy *grid-height*))
-        ;; SÜRÜKLEYEREK BOYAMA: direkt aracı uygula
-        (setf (aref *grid* gy gx) *current-tool*)
-        (update-tile-on-canvas canvas gx gy)))))
+  "Sol tuş basılı sürükleme: fırça gibi boyama. (kamera varsa) world’e çevir."
+  (focus canvas)
+  (multiple-value-bind (px py) (event->world-xy evt)
+    (multiple-value-bind (gx _) (floor px *tile-size*)
+      (declare (ignore _))
+      (multiple-value-bind (gy __) (floor py *tile-size*)
+        (declare (ignore __))
+        (when (and (>= gx 0) (< gx *grid-width*)
+                   (>= gy 0) (< gy *grid-height*))
+          (setf (aref *grid* gy gx) *current-tool*)
+          (update-tile-on-canvas canvas gx gy))))))
 
 (defun init-canvas (parent)
-  "Grid çizen ve tıklamaları yakalayan canvas yarat."
-  (let* ((w (* *grid-width*  *tile-size*))
-         (h (* *grid-height* *tile-size*))
-         (canvas (make-instance 'canvas
+  "Grid çizen ve tıklamaları yakalayan canvas yarat.
+Ok tuşları ile 'kamera' kaydırma: TK-CALL yok; item'ları move ile kaydırıyoruz."
+  (let* ((canvas (make-instance 'canvas
                                 :master parent
-                                :width  w
-                                :height h
+                                :width  800
+                                :height 600
                                 :background "gray20")))
-    ;; Hücreleri çiz ve rect id’lerini *rects* içine yaz
-    (dotimes (row *grid-height*)
-      (dotimes (col *grid-width*)
-        (let* ((x0 (* col *tile-size*))
-               (y0 (* row *tile-size*))
+    (setf *canvas* canvas)
+
+    ;; Kamera offset sıfırla (global pan sistemi)
+    (reset-canvas-camera!)
+
+    ;; rect'leri oluştur
+    (dotimes (gy *grid-height*)
+      (dotimes (gx *grid-width*)
+        (let* ((x0 (* gx *tile-size*))
+               (y0 (* gy *tile-size*))
                (x1 (+ x0 *tile-size*))
                (y1 (+ y0 *tile-size*))
-               (id (create-rectangle canvas x0 y0 x1 y1))
-               (tile (aref *grid* row col)))
-          ;; Çerçeve ve dolgu renklerini ayarla
-          (itemconfigure canvas id "outline" "gray30")
-          (itemconfigure canvas id "fill" (tile->color tile))
-          ;; Canvas id’sini kaydet
-          (setf (aref *rects* row col) id))))
+               (tile (aref *grid* gy gx))
+               ;; ÖNEMLİ: create-rectangle keyword kabul etmeyen LTK'lar var
+               (rect (create-rectangle canvas x0 y0 x1 y1)))
+          (setf (aref *rects* gy gx) rect)
+          (itemconfigure canvas rect "fill" (tile->color tile))
+          (itemconfigure canvas rect "outline" "gray35"))))
 
-    ;; Mouse sol tık: toggle
+    (pack canvas :side :top :fill :both :expand t)
+
+    ;; focus
+    (bind canvas "<Enter>"
+          (lambda (evt) (declare (ignore evt)) (focus canvas)))
+
+    ;; mouse
     (bind canvas "<Button-1>"
-          (lambda (evt)
-            (handle-canvas-click canvas evt)))
-
-    ;; Mouse sol tuş basılı iken sürükleme: fırça gibi boyama
+          (lambda (evt) (handle-canvas-click canvas evt)))
     (bind canvas "<B1-Motion>"
-          (lambda (evt)
-            (handle-canvas-paint canvas evt)))
+          (lambda (evt) (handle-canvas-paint canvas evt)))
 
+    ;; ok tuşları: kamera
+    (bind canvas "<KeyPress-Up>"    (lambda (evt) (declare (ignore evt)) (canvas-pan-tiles canvas 0 -1)))
+    (bind canvas "<KeyPress-Down>"  (lambda (evt) (declare (ignore evt)) (canvas-pan-tiles canvas 0  1)))
+    (bind canvas "<KeyPress-Left>"  (lambda (evt) (declare (ignore evt)) (canvas-pan-tiles canvas -1 0)))
+    (bind canvas "<KeyPress-Right>" (lambda (evt) (declare (ignore evt)) (canvas-pan-tiles canvas  1 0)))
+
+    ;; Shift+Ok: hızlı
+    (bind canvas "<Shift-KeyPress-Up>"    (lambda (evt) (declare (ignore evt)) (canvas-pan-tiles canvas 0 -1 :fast? t)))
+    (bind canvas "<Shift-KeyPress-Down>"  (lambda (evt) (declare (ignore evt)) (canvas-pan-tiles canvas 0  1 :fast? t)))
+    (bind canvas "<Shift-KeyPress-Left>"  (lambda (evt) (declare (ignore evt)) (canvas-pan-tiles canvas -1 0 :fast? t)))
+    (bind canvas "<Shift-KeyPress-Right>" (lambda (evt) (declare (ignore evt)) (canvas-pan-tiles canvas  1 0 :fast? t)))
+
+    (focus canvas)
     canvas))
 
 ;;;------------------------------------------------------------
