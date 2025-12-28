@@ -287,21 +287,9 @@ veya
 (defparameter *canvas-zoom-max* 8.0)
 (defparameter *canvas-zoom-step* 0.25)
 
-(defun reset-canvas-camera! ()
-  (setf *canvas-cam-x* 0.0
-        *canvas-cam-y* 0.0))
-
 (defun effective-tile-size ()
   "Ekrandaki (zoom uygulanmış) tile piksel boyutu."
   (* (float *tile-size* 1.0) (float *canvas-zoom* 1.0)))
-
-(defun %ltk-fbound (name)
-  "LTK paketinde NAME isimli fbound sembolü bul."
-  (let ((pkg (find-package :ltk)))
-    (when pkg
-      (multiple-value-bind (sym status) (find-symbol name pkg)
-        (declare (ignore status))
-        (when (and sym (fboundp sym)) sym)))))
 
 (defun %canvas-tk-path (canvas)
   (let* ((path-sym (%ltk-fbound "WIDGET-PATH")))
@@ -316,12 +304,6 @@ veya
       (error "LTK'da SEND-WISH bulunamadı."))
     (funcall (symbol-function send-sym)
              (apply #'format nil fmt args))))
-
-(defun %canvas-move-all (canvas dx dy)
-  "Canvas içindeki tüm item’ları dx/dy kadar kaydır. (HER ZAMAN send-wish)"
-  (let ((path (%canvas-tk-path canvas)))
-    (%send-wish "~a move all ~d ~d" path (truncate dx) (truncate dy))
-    t))
 
 (defun %canvas-scale-all (canvas ratio)
   "Canvas içindeki tüm item’ları oranla ölçekle. (0,0 etrafında)"
@@ -357,52 +339,17 @@ veya
   (let ((z (/ 24.0 (max 1.0 (float ts 1.0)))))
     (max 1.0 (min 6.0 z))))
 
-(defun event->world-xy (evt)
-  "Event (window) coords -> world coords (kamera offset eklenmiş).
-DİKKAT: world burada 'zoom uygulanmış pixel space' (screen unit) gibi davranır."
-  (values (+ (float (event-x evt) 1.0) *canvas-cam-x*)
-          (+ (float (event-y evt) 1.0) *canvas-cam-y*)))
-
 (defun canvas-pan-tiles (canvas dx-tiles dy-tiles &key fast?)
   "Ok tuşlarıyla pan: dünyayı kaydır (kamera). Zoom’a göre px hesabı."
-  (let* ((step (if fast? *scroll-step-tiles-fast* *scroll-step-tiles*))
-         (ts   (effective-tile-size))
-         (dx   (* dx-tiles step ts))
-         (dy   (* dy-tiles step ts)))
+  (let* ((step   (if fast? *scroll-step-tiles-fast* *scroll-step-tiles*))
+         (tilepx (effective-tile-size))
+         (dx     (* (float dx-tiles 1.0) (float step 1.0) tilepx))
+         (dy     (* (float dy-tiles 1.0) (float step 1.0) tilepx)))
     (when (or (/= dx 0.0) (/= dy 0.0))
       (incf *canvas-cam-x* dx)
       (incf *canvas-cam-y* dy)
+      ;; görünen sabit kalsın diye item'ları ters yönde kaydır
       (%canvas-move-all canvas (- dx) (- dy)))))
-
-(defun handle-canvas-click (canvas evt)
-  "Canvas’e tıkla: (kamera+zoom) world’e çevirip tile bulur."
-  (focus canvas)
-  (multiple-value-bind (px py) (event->world-xy evt)
-    (let ((ts (effective-tile-size)))
-      (multiple-value-bind (gx _) (floor px ts)
-        (declare (ignore _))
-        (multiple-value-bind (gy __) (floor py ts)
-          (declare (ignore __))
-          (when (and (>= gx 0) (< gx *grid-width*)
-                     (>= gy 0) (< gy *grid-height*))
-            (let* ((old (aref *grid* gy gx))
-                   (new (if (eql old *current-tool*) :empty *current-tool*)))
-              (setf (aref *grid* gy gx) new)
-              (update-tile-on-canvas canvas gx gy))))))))
-
-(defun handle-canvas-paint (canvas evt)
-  "Sol tuş basılı sürükleme: fırça. (kamera+zoom) world’e çevir."
-  (focus canvas)
-  (multiple-value-bind (px py) (event->world-xy evt)
-    (let ((ts (effective-tile-size)))
-      (multiple-value-bind (gx _) (floor px ts)
-        (declare (ignore _))
-        (multiple-value-bind (gy __) (floor py ts)
-          (declare (ignore __))
-          (when (and (>= gx 0) (< gx *grid-width*)
-                     (>= gy 0) (< gy *grid-height*))
-            (setf (aref *grid* gy gx) *current-tool*)
-            (update-tile-on-canvas canvas gx gy)))))))
 
 ;;;------------------------------------------------------------
 ;;; Canvas "kamera" (scroll) + event coord fix
@@ -418,65 +365,47 @@ DİKKAT: world burada 'zoom uygulanmış pixel space' (screen unit) gibi davran�
 (defparameter *canvas-cam-x* 0.0)  ;; world pixel offset (viewport origin -> world)
 (defparameter *canvas-cam-y* 0.0)
 
-(defun reset-canvas-camera! ()
-  (setf *canvas-cam-x* 0.0
-        *canvas-cam-y* 0.0))
-
 (defparameter *scroll-step-tiles* 1)
 (defparameter *scroll-step-tiles-fast* 6)
 
-(defun %ltk-fbound (name)
-  "LTK paketinde NAME isimli fbound sembolü bul (export edilse de edilmezse de)."
-  (let ((pkg (find-package :ltk)))
-    (when pkg
-      (multiple-value-bind (sym status) (find-symbol name pkg)
-        (declare (ignore status))
-        (when (and sym (fboundp sym)) sym)))))
-
 (defun %canvas-move-all (canvas dx dy)
-  "Canvas içindeki tüm item’ları dx/dy kadar kaydır.
-LTK:MOVE bazı sürümlerde widget move’dur; canvas item move için ITEMMOVE gerekir."
-  (let ((dx (truncate dx))
-        (dy (truncate dy)))
+  "Canvas içindeki tüm item’ları dx/dy kadar kaydır. (HER ZAMAN send-wish)"
+  (let ((path (%canvas-tk-path canvas)))
+    (%send-wish "~a move all ~,6F ~,6F"
+                path
+                (float dx 1.0)
+                (float dy 1.0))
+    t))
 
-    ;; 1) Tercih: LTK itemmove wrapper'ı
-    (let ((itemmove-sym (%ltk-fbound "ITEMMOVE")))
-      (when itemmove-sym
-        (funcall (symbol-function itemmove-sym) canvas "all" dx dy)
-        (return-from %canvas-move-all t)))
+(defun handle-canvas-click (canvas evt)
+  "Canvas’e tıkla: (kamera+zoom) world’e çevirip tile bulur."
+  (focus canvas)
+  (multiple-value-bind (world-x world-y) (event->world-xy evt)
+    (let ((tile-px (effective-tile-size)))
+      (multiple-value-bind (grid-x remainder-x) (floor world-x tile-px)
+        (declare (ignore remainder-x))
+        (multiple-value-bind (grid-y remainder-y) (floor world-y tile-px)
+          (declare (ignore remainder-y))
+          (when (and (>= grid-x 0) (< grid-x *grid-width*)
+                     (>= grid-y 0) (< grid-y *grid-height*))
+            (let* ((old (aref *grid* grid-y grid-x))
+                   (new (if (eql old *current-tool*) :empty *current-tool*)))
+              (setf (aref *grid* grid-y grid-x) new)
+              (update-tile-on-canvas canvas grid-x grid-y))))))))
 
-    ;; 2) Fallback: SEND-WISH ile ham Tcl komutu
-    (let* ((send-sym (%ltk-fbound "SEND-WISH"))
-           (path-sym (%ltk-fbound "WIDGET-PATH")))
-      (unless send-sym
-        (error "LTK'da ITEMMOVE yok ve SEND-WISH de yok. Canvas pan yapılamıyor."))
-
-      (let ((path (or (and path-sym (funcall (symbol-function path-sym) canvas))
-                      (ignore-errors (slot-value canvas (find-symbol "PATH" (find-package :ltk))))
-                      (ignore-errors (slot-value canvas (find-symbol "NAME" (find-package :ltk))))
-                      (error "Canvas Tk path bulunamadı."))))
-        (funcall (symbol-function send-sym)
-                 (format nil "~a move all ~d ~d" path dx dy)))
-      t)))
-
-(defun event->world-xy (evt)
-  "Event (window) coords -> world coords (kamera offset eklenmiş)."
-  (values (+ (float (event-x evt) 1.0) *canvas-cam-x*)
-          (+ (float (event-y evt) 1.0) *canvas-cam-y*)))
-
-(defun canvas-pan-tiles (canvas dx-tiles dy-tiles &key fast?)
-  "Ok tuşlarıyla pan: dünyayı kaydır (kamera)."
-  (let* ((step (if fast? *scroll-step-tiles-fast* *scroll-step-tiles*))
-         (dx   (* dx-tiles step *tile-size*))   ;; px
-         (dy   (* dy-tiles step *tile-size*)))  ;; px
-    (when (or (/= dx 0) (/= dy 0))
-      ;; Kamera world origin'i ileri gider
-      (incf *canvas-cam-x* (float dx 1.0))
-      (incf *canvas-cam-y* (float dy 1.0))
-      ;; Görünen pencere sabit, item’ları ters yönde kaydır
-      (%canvas-move-all canvas (- dx) (- dy)))))
-
-
+(defun handle-canvas-paint (canvas evt)
+  "Sol tuş basılı sürükleme: fırça. (kamera+zoom) world’e çevir."
+  (focus canvas)
+  (multiple-value-bind (world-x world-y) (event->world-xy evt)
+    (let ((tile-px (effective-tile-size)))
+      (multiple-value-bind (grid-x remainder-x) (floor world-x tile-px)
+        (declare (ignore remainder-x))
+        (multiple-value-bind (grid-y remainder-y) (floor world-y tile-px)
+          (declare (ignore remainder-y))
+          (when (and (>= grid-x 0) (< grid-x *grid-width*)
+                     (>= grid-y 0) (< grid-y *grid-height*))
+            (setf (aref *grid* grid-y grid-x) *current-tool*)
+            (update-tile-on-canvas canvas grid-x grid-y)))))))
 
 ;; ------------------------------------------------------------
 ;; Canvas "kamera" (pan)  (LTK sürüm bağımsız)
@@ -504,48 +433,6 @@ LTK:MOVE bazı sürümlerde widget move’dur; canvas item move için ITEMMOVE g
   "Event (window) coords -> world coords (kamera offset eklenmiş)."
   (values (+ (float (event-x evt) 1.0) *canvas-cam-x*)
           (+ (float (event-y evt) 1.0) *canvas-cam-y*)))
-
-(defun canvas-pan-tiles (canvas dx-tiles dy-tiles &key fast?)
-  "Ok tuşlarıyla pan: dünyayı kaydır (kamera)."
-  (let* ((step (if fast? *scroll-step-tiles-fast* *scroll-step-tiles*))
-         (dx   (* dx-tiles step *tile-size*))   ;; px
-         (dy   (* dy-tiles step *tile-size*)))  ;; px
-    (when (or (/= dx 0) (/= dy 0))
-      (incf *canvas-cam-x* (float dx 1.0))
-      (incf *canvas-cam-y* (float dy 1.0))
-      ;; item’ları ters yönde kaydır
-      (%canvas-move-all canvas (- dx) (- dy)))))
-
-(defun handle-canvas-click (canvas evt)
-  "Canvas’e tıklandığında çağrılır. (kamera varsa) world’e çevirip tile bulur."
-  (focus canvas)
-  (multiple-value-bind (px py) (event->world-xy evt)
-    (multiple-value-bind (gx _) (floor px *tile-size*)
-      (declare (ignore _))
-      (multiple-value-bind (gy __) (floor py *tile-size*)
-        (declare (ignore __))
-        (when (and (>= gx 0) (< gx *grid-width*)
-                   (>= gy 0) (< gy *grid-height*))
-          ;; TIKLAMA: toggle
-          (let* ((old (aref *grid* gy gx))
-                 (new (if (eql old *current-tool*)
-                          :empty
-                          *current-tool*)))
-            (setf (aref *grid* gy gx) new)
-            (update-tile-on-canvas canvas gx gy)))))))
-
-(defun handle-canvas-paint (canvas evt)
-  "Sol tuş basılı sürükleme: fırça gibi boyama. (kamera varsa) world’e çevir."
-  (focus canvas)
-  (multiple-value-bind (px py) (event->world-xy evt)
-    (multiple-value-bind (gx _) (floor px *tile-size*)
-      (declare (ignore _))
-      (multiple-value-bind (gy __) (floor py *tile-size*)
-        (declare (ignore __))
-        (when (and (>= gx 0) (< gx *grid-width*)
-                   (>= gy 0) (< gy *grid-height*))
-          (setf (aref *grid* gy gx) *current-tool*)
-          (update-tile-on-canvas canvas gx gy))))))
 
 (defun init-canvas (parent)
   "Grid çizen ve tıklamaları yakalayan canvas yarat.
