@@ -305,25 +305,54 @@ veya
     (funcall (symbol-function send-sym)
              (apply #'format nil fmt args))))
 
-(defun %canvas-scale-all (canvas ratio)
-  "Canvas içindeki tüm item’ları oranla ölçekle. (0,0 etrafında)"
+(defun %canvas-scale-all-at (canvas origin-x origin-y ratio)
+  "Canvas içindeki tüm item’ları ORIGIN etrafında ölçekle."
   (let ((path (%canvas-tk-path canvas)))
-    ;; ratio float olabilir
-    (%send-wish "~a scale all 0 0 ~,6F ~,6F" path (float ratio 1.0) (float ratio 1.0))
+    (%send-wish "~a scale all ~,6F ~,6F ~,6F ~,6F"
+                path
+                (float origin-x 1.0)
+                (float origin-y 1.0)
+                (float ratio 1.0)
+                (float ratio 1.0))
     t))
 
-(defun set-canvas-zoom! (canvas new-zoom)
-  "Zoom değiştir: tüm item’ları scale et + kamera offset’ini aynı oranda çarp."
+(defun set-canvas-zoom-at! (canvas new-zoom origin-x origin-y)
+  "Zoom değiştir, ölçeklemeyi mouse noktası etrafında yap.
+Kamera offset'i de, boyama/tıklama sapmasın diye doğru günceller."
   (let* ((old (float *canvas-zoom* 1.0))
          (nz  (float new-zoom 1.0))
          (nz  (max *canvas-zoom-min* (min *canvas-zoom-max* nz)))
-         (ratio (if (zerop old) 1.0 (/ nz old))))
+         (ratio (if (zerop old) 1.0 (/ nz old)))
+         (ox (float origin-x 1.0))
+         (oy (float origin-y 1.0)))
     (when (and canvas (not (= ratio 1.0)))
-      (%canvas-scale-all canvas ratio)
-      (setf *canvas-cam-x* (* *canvas-cam-x* ratio)
-            *canvas-cam-y* (* *canvas-cam-y* ratio)))
+      (%canvas-scale-all-at canvas ox oy ratio)
+      ;; world = event + cam yaklaşımına göre:
+      ;; cam' = ratio*cam + (ratio-1)*origin   (sapmayı sıfırlar)
+      (setf *canvas-cam-x* (+ (* (float *canvas-cam-x* 1.0) ratio)
+                              (* (- ratio 1.0) ox))
+            *canvas-cam-y* (+ (* (float *canvas-cam-y* 1.0) ratio)
+                              (* (- ratio 1.0) oy))))
     (setf *canvas-zoom* nz)
     nz))
+
+;; ------------------------------------------------------------
+;; Wrapper'lar: eski API (set-canvas-zoom!/zoom-in!/zoom-out!)
+;; Yeni set-canvas-zoom-at! üzerine kurulu.
+;; ------------------------------------------------------------
+
+(defparameter *canvas-view-w* 800.0)
+(defparameter *canvas-view-h* 600.0)
+
+(defun %canvas-default-origin ()
+  "Klavye ile zoom için 'mantıklı' merkez (canvas ortası)."
+  (values (* 0.5f0 (float *canvas-view-w* 1.0))
+          (* 0.5f0 (float *canvas-view-h* 1.0))))
+
+(defun set-canvas-zoom! (canvas new-zoom)
+  "Klavye/başlangıç zoom'u: canvas ortası etrafında zoom yap."
+  (multiple-value-bind (ox oy) (%canvas-default-origin)
+    (set-canvas-zoom-at! canvas new-zoom ox oy)))
 
 (defun zoom-in! (canvas)
   (set-canvas-zoom! canvas (+ *canvas-zoom* *canvas-zoom-step*)))
@@ -331,6 +360,13 @@ veya
 (defun zoom-out! (canvas)
   (set-canvas-zoom! canvas (- *canvas-zoom* *canvas-zoom-step*)))
 
+(defun zoom-in-at! (canvas origin-x origin-y)
+  (set-canvas-zoom-at! canvas (+ *canvas-zoom* *canvas-zoom-step*)
+                       origin-x origin-y))
+
+(defun zoom-out-at! (canvas origin-x origin-y)
+  (set-canvas-zoom-at! canvas (- *canvas-zoom* *canvas-zoom-step*)
+                      origin-x origin-y))
 (defun zoom-reset! (canvas)
   (set-canvas-zoom! canvas 1.0))
 
@@ -434,15 +470,45 @@ veya
   (values (+ (float (event-x evt) 1.0) *canvas-cam-x*)
           (+ (float (event-y evt) 1.0) *canvas-cam-y*)))
 
+(defparameter *rmb-dragging?* nil)
+(defparameter *rmb-last-x* 0.0)
+(defparameter *rmb-last-y* 0.0)
+
+(defun rmb-pan-start! (canvas evt)
+  (declare (ignore canvas))
+  (setf *rmb-dragging?* t
+        *rmb-last-x* (float (event-x evt) 1.0)
+        *rmb-last-y* (float (event-y evt) 1.0)))
+
+(defun rmb-pan-move! (canvas evt)
+  (when *rmb-dragging?*
+    (let* ((x (float (event-x evt) 1.0))
+           (y (float (event-y evt) 1.0))
+           (dx (- x *rmb-last-x*))
+           (dy (- y *rmb-last-y*)))
+      (when (or (/= dx 0.0) (/= dy 0.0))
+        ;; Haritayı mouse ile "tutarak" sürükleme:
+        ;; İçerik mouse yönünde gider, kamera ters yönde güncellenir.
+        (%canvas-move-all canvas dx dy)
+        (decf *canvas-cam-x* dx)
+        (decf *canvas-cam-y* dy))
+      (setf *rmb-last-x* x
+            *rmb-last-y* y))))
+
+(defun rmb-pan-end! (canvas evt)
+  (declare (ignore canvas evt))
+  (setf *rmb-dragging?* nil))
+
 (defun init-canvas (parent)
   "Grid çizen ve tıklamaları yakalayan canvas yarat.
 Ok tuşları: pan.  +/- : zoom. 0: reset zoom."
   (let* ((canvas (make-instance 'canvas
-                                :master parent
-                                :width  800
-                                :height 600
-                                :background "gray20")))
-    (setf *canvas* canvas)
+				:master parent
+				:width  800
+				:height 600
+				:background "gray20")))
+    (setf *canvas-view-w* 800.0
+          *canvas-view-h* 600.0)
 
     ;; Kamera/zoom başlangıç
     (reset-canvas-camera!)
@@ -475,6 +541,24 @@ Ok tuşları: pan.  +/- : zoom. 0: reset zoom."
           (lambda (evt) (handle-canvas-click canvas evt)))
     (bind canvas "<B1-Motion>"
           (lambda (evt) (handle-canvas-paint canvas evt)))
+
+    ;; sağ tuş basılı tut + sürükle = pan
+    (bind canvas "<Button-3>"
+          (lambda (evt) (focus canvas) (rmb-pan-start! canvas evt)))
+    (bind canvas "<B3-Motion>"
+          (lambda (evt) (rmb-pan-move! canvas evt)))
+    (bind canvas "<ButtonRelease-3>"
+          (lambda (evt) (rmb-pan-end! canvas evt)))
+
+    ;; mouse wheel zoom (Linux/Tk: Button-4/5)
+    (bind canvas "<Button-4>"
+          (lambda (evt)
+            (focus canvas)
+            (zoom-in-at! canvas (event-x evt) (event-y evt))))
+    (bind canvas "<Button-5>"
+          (lambda (evt)
+            (focus canvas)
+            (zoom-out-at! canvas (event-x evt) (event-y evt))))
 
     ;; ok tuşları: kamera
     (bind canvas "<KeyPress-Up>"    (lambda (evt) (declare (ignore evt)) (canvas-pan-tiles canvas 0 -1)))
